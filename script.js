@@ -197,7 +197,8 @@ class ChordTrainer {
     this.timeoutId = null;
     this.rafId = null;
     this.playedPitchClasses = new Set();
-    this.allPlayedNotes = []; // for strict mode: all note-ons during window
+    this.heldNotes = new Set(); // MIDI note numbers currently held, for keyboard highlight
+    this.chordDurationMs = 0;
     this.detected = false;
     this.score = { correct: 0, total: 0 };
     this.stats = {}; // chordName -> { attempts, correct, totalResponseMs }
@@ -212,7 +213,7 @@ class ChordTrainer {
     this.currentChord = null;
     this.detected = false;
     this.playedPitchClasses.clear();
-    this.allPlayedNotes = [];
+    this.heldNotes.clear();
     updateScoreUI();
     setChordDisplay('Ready', 'neutral');
     setFeedback('');
@@ -249,7 +250,8 @@ class ChordTrainer {
     setFeedback('');
     setProgress(0, 'neutral');
     showSummary(this.score, this.stats);
-    clearKeyboardHighlight();
+    this.heldNotes.clear();
+    this.refreshKeyboardHighlight();
     clearBeatDots();
   }
 
@@ -295,12 +297,12 @@ class ChordTrainer {
     this.currentChord = nextChord;
     this.detected = false;
     this.playedPitchClasses.clear();
-    this.allPlayedNotes = [];
-    clearKeyboardHighlight();
+    // Note: heldNotes is NOT cleared so the visual reflects what's actually down.
+    this.refreshKeyboardHighlight();
 
-    const durationMs = settings.timePerChord * 1000;
+    this.chordDurationMs = settings.timePerChord * 1000;
     this.chordStartTime = performance.now();
-    this.chordEndTime = this.chordStartTime + durationMs;
+    this.chordEndTime = this.chordStartTime + this.chordDurationMs;
 
     setChordDisplay(this.currentChord.name, 'neutral');
     setFeedback('');
@@ -308,14 +310,16 @@ class ChordTrainer {
 
     this.tickProgress();
 
-    this.timeoutId = setTimeout(() => this.endChord(), durationMs);
+    this.timeoutId = setTimeout(() => this.endChord(), this.chordDurationMs);
   }
 
   tickProgress() {
     const now = performance.now();
     const remaining = Math.max(0, this.chordEndTime - now);
-    const total = settings.timePerChord * 1000;
-    setProgress(remaining / total);
+    const total = this.chordDurationMs || 1;
+    // Preserve the 'correct' variant once detected so the bar stays green
+    // until the chord ends.
+    setProgress(remaining / total, this.detected ? 'correct' : undefined);
     if (this.state === 'playing' && remaining > 0) {
       this.rafId = requestAnimationFrame(() => this.tickProgress());
     }
@@ -365,12 +369,12 @@ class ChordTrainer {
      match the required set exactly (no extras).
   */
   handleNoteOn(note) {
-    highlightKeyboard(note, true);
+    this.heldNotes.add(note);
+    this.refreshKeyboardHighlight();
     if (this.state !== 'playing' || !this.currentChord || this.detected) return;
 
     const pc = ((note % 12) + 12) % 12;
     this.playedPitchClasses.add(pc);
-    this.allPlayedNotes.push(pc);
 
     const required = this.currentChord.pitchClasses;
     const allRequiredPresent = [...required].every(p => this.playedPitchClasses.has(p));
@@ -399,13 +403,25 @@ class ChordTrainer {
   }
 
   handleNoteOff(note) {
-    highlightKeyboard(note, false);
+    this.heldNotes.delete(note);
+    this.refreshKeyboardHighlight();
+  }
+
+  refreshKeyboardHighlight() {
+    // Compute the set of pitch classes currently held across all octaves,
+    // then mark on-screen keys with matching pitch class.
+    const heldPCs = new Set();
+    for (const n of this.heldNotes) heldPCs.add(((n % 12) + 12) % 12);
+    document.querySelectorAll('.key').forEach(k => {
+      const pc = parseInt(k.dataset.pc, 10);
+      k.classList.toggle('active', heldPCs.has(pc));
+    });
   }
 
   getProgressFraction() {
     const now = performance.now();
     const remaining = Math.max(0, this.chordEndTime - now);
-    const total = settings.timePerChord * 1000;
+    const total = this.chordDurationMs || 1;
     return remaining / total;
   }
 }
@@ -419,6 +435,10 @@ const connectedInputs = new Map(); // id -> MIDIInput
 
 function isMidiSupported() {
   return typeof navigator !== 'undefined' && typeof navigator.requestMIDIAccess === 'function';
+}
+
+function hasMidiInput() {
+  return connectedInputs.size > 0;
 }
 
 async function connectMidi() {
@@ -450,12 +470,15 @@ function bindMidiInputs() {
   }
 
   const names = [...connectedInputs.values()].map(i => i.name).filter(Boolean);
+  const startBtn = document.getElementById('start');
   if (names.length === 0) {
-    setMidiStatus('Connected (no devices)', 'connected');
+    setMidiStatus('No devices found', 'error');
+    // Permission granted but no device — disable Start until one shows up.
+    startBtn.disabled = true;
   } else {
     setMidiStatus(`Connected: ${names.join(', ')}`, 'connected');
+    if (trainer.state === 'idle') startBtn.disabled = false;
   }
-  document.getElementById('start').disabled = false;
 }
 
 function handleMidiMessage(event) {
@@ -621,18 +644,6 @@ function renderKeyboard() {
   }
 }
 
-function highlightKeyboard(note, on) {
-  // Highlight all keys with matching pitch class so any octave shows.
-  const pc = ((note % 12) + 12) % 12;
-  document.querySelectorAll(`.key[data-pc="${pc}"]`).forEach(k => {
-    k.classList.toggle('active', on);
-  });
-}
-
-function clearKeyboardHighlight() {
-  document.querySelectorAll('.key.active').forEach(k => k.classList.remove('active'));
-}
-
 /* ---------- Settings UI binding ---------- */
 
 function applySettingsToUI() {
@@ -696,7 +707,7 @@ function bindControlHandlers() {
   });
 
   document.getElementById('stop').addEventListener('click', () => {
-    document.getElementById('start').disabled = !midiAccess;
+    document.getElementById('start').disabled = !hasMidiInput();
     document.getElementById('stop').disabled = true;
     trainer.stop();
   });
@@ -705,7 +716,7 @@ function bindControlHandlers() {
     if (trainer.state !== 'idle') {
       // Stop first
       trainer.stop();
-      document.getElementById('start').disabled = !midiAccess;
+      document.getElementById('start').disabled = !hasMidiInput();
       document.getElementById('stop').disabled = true;
     }
     trainer.reset();

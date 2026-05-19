@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chord Trainer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Chord Trainer</h1>
+    <div id="midi-status" class="status disconnected">MIDI: not connected</div>
+  </header>
+
+  <main>
+    <div id="compat-warning" class="warning hidden">
+      Your browser doesn't support the Web MIDI API. Please use Chrome or Edge.
+    </div>
+
+    <section class="display">
+      <div class="metronome-row" aria-hidden="true">
+        <div class="beat-dot" data-beat="0"></div>
+        <div class="beat-dot" data-beat="1"></div>
+        <div class="beat-dot" data-beat="2"></div>
+        <div class="beat-dot" data-beat="3"></div>
+      </div>
+
+      <div id="chord-name" class="chord-name">Ready</div>
+
+      <div class="progress-bar" aria-hidden="true">
+        <div id="progress-fill" class="progress-fill"></div>
+      </div>
+
+      <div id="feedback" class="feedback" aria-live="polite"></div>
+    </section>
+
+    <section class="keyboard-wrap">
+      <div id="keyboard" class="keyboard" aria-hidden="true"></div>
+    </section>
+
+    <section class="score">
+      <div class="score-line">
+        <span class="score-label">Score</span>
+        <span id="score-correct">0</span>
+        <span class="score-sep">/</span>
+        <span id="score-total">0</span>
+        <span class="score-sep">·</span>
+        <span id="score-accuracy">—</span>
+      </div>
+    </section>
+
+    <section class="controls">
+      <button id="connect-midi" type="button">Connect MIDI</button>
+      <button id="start" type="button" disabled>Start</button>
+      <button id="stop" type="button" disabled>Stop</button>
+      <button id="reset" type="button">Reset</button>
+    </section>
+
+    <section class="settings">
+      <details open>
+        <summary>Settings</summary>
+
+        <div class="setting">
+          <label for="pool">Chord pool</label>
+          <select id="pool">
+            <option value="naturalMajors">Natural majors only (7)</option>
+            <option value="allMajors">All majors (12)</option>
+            <option value="naturalMinors">Natural minors only (7)</option>
+            <option value="allMinors">All minors (12)</option>
+            <option value="naturals">Naturals: majors + minors (14)</option>
+            <option value="everything" selected>Everything (24)</option>
+          </select>
+        </div>
+
+        <div class="setting">
+          <label for="tempo">Tempo: <span id="tempo-value">90</span> BPM</label>
+          <input type="range" id="tempo" min="60" max="160" step="1" value="90">
+        </div>
+
+        <div class="setting">
+          <label for="time-per-chord">Time per chord: <span id="time-per-chord-value">3.0</span>s</label>
+          <input type="range" id="time-per-chord" min="1" max="5" step="0.5" value="3">
+        </div>
+
+        <div class="setting setting-inline">
+          <label for="metronome-on">Metronome</label>
+          <input type="checkbox" id="metronome-on" checked>
+        </div>
+
+        <div class="setting">
+          <label for="metronome-volume">Metronome volume: <span id="volume-value">50</span>%</label>
+          <input type="range" id="metronome-volume" min="0" max="100" step="1" value="50">
+        </div>
+
+        <div class="setting setting-inline">
+          <label for="strict-mode">Strict mode (no extra notes)</label>
+          <input type="checkbox" id="strict-mode">
+        </div>
+
+        <div class="setting setting-inline">
+          <label for="ding-on">"Ding" on correct answer</label>
+          <input type="checkbox" id="ding-on" checked>
+        </div>
+      </details>
+    </section>
+
+    <section id="summary" class="summary hidden">
+      <h2>Session summary</h2>
+      <div id="summary-content"></div>
+    </section>
+  </main>
+
+  <footer>
+    <a href="https://github.com/george-itf/piano-chord" target="_blank" rel="noopener">Source</a>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

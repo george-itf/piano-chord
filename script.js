@@ -185,6 +185,13 @@ class Metronome {
 
 const metronome = new Metronome();
 
+// Pause between the end of one chord and the start of the next. Asymmetric:
+// on a miss the user needs time to read the "Was: X" feedback and notice
+// what they missed; on a correct answer the user already knows they got it,
+// so we keep the flow tight.
+const PAUSE_AFTER_CORRECT_MS = 200;
+const PAUSE_AFTER_INCORRECT_MS = 600;
+
 /* ---------- ChordTrainer state machine ---------- */
 
 class ChordTrainer {
@@ -197,7 +204,8 @@ class ChordTrainer {
     this.timeoutId = null;
     this.rafId = null;
     this.playedPitchClasses = new Set();
-    this.allPlayedNotes = []; // for strict mode: all note-ons during window
+    this.heldNotes = new Set(); // MIDI note numbers currently held, for keyboard highlight
+    this.chordDurationMs = 0;
     this.detected = false;
     this.score = { correct: 0, total: 0 };
     this.stats = {}; // chordName -> { attempts, correct, totalResponseMs }
@@ -212,7 +220,7 @@ class ChordTrainer {
     this.currentChord = null;
     this.detected = false;
     this.playedPitchClasses.clear();
-    this.allPlayedNotes = [];
+    this.heldNotes.clear();
     updateScoreUI();
     setChordDisplay('Ready', 'neutral');
     setFeedback('');
@@ -249,7 +257,8 @@ class ChordTrainer {
     setFeedback('');
     setProgress(0, 'neutral');
     showSummary(this.score, this.stats);
-    clearKeyboardHighlight();
+    this.heldNotes.clear();
+    this.refreshKeyboardHighlight();
     clearBeatDots();
   }
 
@@ -295,12 +304,12 @@ class ChordTrainer {
     this.currentChord = nextChord;
     this.detected = false;
     this.playedPitchClasses.clear();
-    this.allPlayedNotes = [];
-    clearKeyboardHighlight();
+    // Note: heldNotes is NOT cleared so the visual reflects what's actually down.
+    this.refreshKeyboardHighlight();
 
-    const durationMs = settings.timePerChord * 1000;
+    this.chordDurationMs = settings.timePerChord * 1000;
     this.chordStartTime = performance.now();
-    this.chordEndTime = this.chordStartTime + durationMs;
+    this.chordEndTime = this.chordStartTime + this.chordDurationMs;
 
     setChordDisplay(this.currentChord.name, 'neutral');
     setFeedback('');
@@ -308,14 +317,16 @@ class ChordTrainer {
 
     this.tickProgress();
 
-    this.timeoutId = setTimeout(() => this.endChord(), durationMs);
+    this.timeoutId = setTimeout(() => this.endChord(), this.chordDurationMs);
   }
 
   tickProgress() {
     const now = performance.now();
     const remaining = Math.max(0, this.chordEndTime - now);
-    const total = settings.timePerChord * 1000;
-    setProgress(remaining / total);
+    const total = this.chordDurationMs || 1;
+    // Preserve the 'correct' variant once detected so the bar stays green
+    // until the chord ends.
+    setProgress(remaining / total, this.detected ? 'correct' : undefined);
     if (this.state === 'playing' && remaining > 0) {
       this.rafId = requestAnimationFrame(() => this.tickProgress());
     }
@@ -344,10 +355,10 @@ class ChordTrainer {
 
     updateScoreUI();
 
-    // Small pause to let the colour flash register, then next chord.
+    const pauseMs = this.detected ? PAUSE_AFTER_CORRECT_MS : PAUSE_AFTER_INCORRECT_MS;
     this.timeoutId = setTimeout(() => {
       if (this.state === 'playing') this.nextChord();
-    }, 200);
+    }, pauseMs);
   }
 
   getStat(name) {
@@ -365,19 +376,24 @@ class ChordTrainer {
      match the required set exactly (no extras).
   */
   handleNoteOn(note) {
-    highlightKeyboard(note, true);
+    this.heldNotes.add(note);
+    this.refreshKeyboardHighlight();
     if (this.state !== 'playing' || !this.currentChord || this.detected) return;
 
     const pc = ((note % 12) + 12) % 12;
     this.playedPitchClasses.add(pc);
-    this.allPlayedNotes.push(pc);
 
     const required = this.currentChord.pitchClasses;
     const allRequiredPresent = [...required].every(p => this.playedPitchClasses.has(p));
     if (!allRequiredPresent) return;
 
     if (settings.strictMode) {
-      // Strict: played set must equal required set, no extras.
+      // Strict mode operates on pitch classes, not physical keys: the set of
+      // pitch classes played must equal the set required by the triad. This
+      // accepts octave doublings of chord tones (e.g. C3 + C4 + E4 + G4 still
+      // counts as C major) but rejects any pitch class outside the triad.
+      // Physical-note strictness would penalise normal two-handed voicings,
+      // which isn't what a self-taught pianist needs from a practice tool.
       if (this.playedPitchClasses.size !== required.size) return;
       for (const p of this.playedPitchClasses) {
         if (!required.has(p)) return;
@@ -399,13 +415,25 @@ class ChordTrainer {
   }
 
   handleNoteOff(note) {
-    highlightKeyboard(note, false);
+    this.heldNotes.delete(note);
+    this.refreshKeyboardHighlight();
+  }
+
+  refreshKeyboardHighlight() {
+    // Compute the set of pitch classes currently held across all octaves,
+    // then mark on-screen keys with matching pitch class.
+    const heldPCs = new Set();
+    for (const n of this.heldNotes) heldPCs.add(((n % 12) + 12) % 12);
+    document.querySelectorAll('.key').forEach(k => {
+      const pc = parseInt(k.dataset.pc, 10);
+      k.classList.toggle('active', heldPCs.has(pc));
+    });
   }
 
   getProgressFraction() {
     const now = performance.now();
     const remaining = Math.max(0, this.chordEndTime - now);
-    const total = settings.timePerChord * 1000;
+    const total = this.chordDurationMs || 1;
     return remaining / total;
   }
 }
@@ -419,6 +447,10 @@ const connectedInputs = new Map(); // id -> MIDIInput
 
 function isMidiSupported() {
   return typeof navigator !== 'undefined' && typeof navigator.requestMIDIAccess === 'function';
+}
+
+function hasMidiInput() {
+  return connectedInputs.size > 0;
 }
 
 async function connectMidi() {
@@ -450,12 +482,15 @@ function bindMidiInputs() {
   }
 
   const names = [...connectedInputs.values()].map(i => i.name).filter(Boolean);
+  const startBtn = document.getElementById('start');
   if (names.length === 0) {
-    setMidiStatus('Connected (no devices)', 'connected');
+    setMidiStatus('No devices found', 'error');
+    // Permission granted but no device — disable Start until one shows up.
+    startBtn.disabled = true;
   } else {
     setMidiStatus(`Connected: ${names.join(', ')}`, 'connected');
+    if (trainer.state === 'idle') startBtn.disabled = false;
   }
-  document.getElementById('start').disabled = false;
 }
 
 function handleMidiMessage(event) {
@@ -546,28 +581,60 @@ function showSummary(score, stats) {
     }))
     .sort((a, b) => a.acc - b.acc || b.attempts - a.attempts);
 
-  content.innerHTML = `
-    <div class="summary-stats">
-      <div><span>Score</span><strong>${score.correct} / ${score.total}</strong></div>
-      <div><span>Accuracy</span><strong>${accuracy}%</strong></div>
-    </div>
-    <table class="summary-table">
-      <thead>
-        <tr><th>Chord</th><th>Correct</th><th>Accuracy</th><th>Avg response</th></tr>
-      </thead>
-      <tbody>
-        ${rows.map(r => `
-          <tr>
-            <td>${r.name}</td>
-            <td>${r.correct} / ${r.attempts}</td>
-            <td>${r.acc}%</td>
-            <td>${r.avgMs == null ? '—' : (r.avgMs / 1000).toFixed(2) + 's'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  `;
+  // Build with the DOM API rather than innerHTML so any future change to
+  // the data source (e.g. user-named chord pools) cannot inject markup.
+  content.replaceChildren(
+    buildSummaryStats(score.correct, score.total, accuracy),
+    buildSummaryTable(rows),
+  );
   summary.classList.remove('hidden');
+}
+
+function buildSummaryStats(correct, total, accuracy) {
+  const wrap = el('div', 'summary-stats');
+  wrap.append(
+    statBlock('Score', `${correct} / ${total}`),
+    statBlock('Accuracy', `${accuracy}%`),
+  );
+  return wrap;
+}
+
+function statBlock(label, value) {
+  const div = el('div');
+  div.append(el('span', null, label), el('strong', null, value));
+  return div;
+}
+
+function buildSummaryTable(rows) {
+  const table = el('table', 'summary-table');
+  const thead = el('thead');
+  const headerRow = el('tr');
+  for (const h of ['Chord', 'Correct', 'Accuracy', 'Avg response']) {
+    headerRow.append(el('th', null, h));
+  }
+  thead.append(headerRow);
+
+  const tbody = el('tbody');
+  for (const r of rows) {
+    const tr = el('tr');
+    tr.append(
+      el('td', null, r.name),
+      el('td', null, `${r.correct} / ${r.attempts}`),
+      el('td', null, `${r.acc}%`),
+      el('td', null, r.avgMs == null ? '—' : `${(r.avgMs / 1000).toFixed(2)}s`),
+    );
+    tbody.append(tr);
+  }
+
+  table.append(thead, tbody);
+  return table;
+}
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
 }
 
 function hideSummary() {
@@ -621,18 +688,6 @@ function renderKeyboard() {
   }
 }
 
-function highlightKeyboard(note, on) {
-  // Highlight all keys with matching pitch class so any octave shows.
-  const pc = ((note % 12) + 12) % 12;
-  document.querySelectorAll(`.key[data-pc="${pc}"]`).forEach(k => {
-    k.classList.toggle('active', on);
-  });
-}
-
-function clearKeyboardHighlight() {
-  document.querySelectorAll('.key.active').forEach(k => k.classList.remove('active'));
-}
-
 /* ---------- Settings UI binding ---------- */
 
 function applySettingsToUI() {
@@ -653,26 +708,32 @@ function bindSettingsHandlers() {
     settings.pool = e.target.value;
     saveSettings(settings);
   });
-  document.getElementById('tempo').addEventListener('input', e => {
-    settings.tempo = parseInt(e.target.value, 10);
+
+  // Range sliders fire 'input' continuously as the user drags. We update
+  // the live UI label and any state the user can hear (metronome tempo /
+  // volume) immediately, but defer the localStorage write to the 'change'
+  // event so we get one write per drag instead of dozens of synchronous
+  // I/O calls.
+  bindRangeSetting('tempo', value => {
+    settings.tempo = parseInt(value, 10);
     document.getElementById('tempo-value').textContent = settings.tempo;
     metronome.bpm = settings.tempo;
-    saveSettings(settings);
   });
-  document.getElementById('time-per-chord').addEventListener('input', e => {
-    settings.timePerChord = parseFloat(e.target.value);
+
+  bindRangeSetting('time-per-chord', value => {
+    settings.timePerChord = parseFloat(value);
     document.getElementById('time-per-chord-value').textContent = settings.timePerChord.toFixed(1);
-    saveSettings(settings);
   });
+
+  bindRangeSetting('metronome-volume', value => {
+    settings.metronomeVolume = parseInt(value, 10);
+    document.getElementById('volume-value').textContent = settings.metronomeVolume;
+    metronome.volume = settings.metronomeOn ? settings.metronomeVolume / 100 : 0;
+  });
+
   document.getElementById('metronome-on').addEventListener('change', e => {
     settings.metronomeOn = e.target.checked;
     metronome.enabled = settings.metronomeOn;
-    metronome.volume = settings.metronomeOn ? settings.metronomeVolume / 100 : 0;
-    saveSettings(settings);
-  });
-  document.getElementById('metronome-volume').addEventListener('input', e => {
-    settings.metronomeVolume = parseInt(e.target.value, 10);
-    document.getElementById('volume-value').textContent = settings.metronomeVolume;
     metronome.volume = settings.metronomeOn ? settings.metronomeVolume / 100 : 0;
     saveSettings(settings);
   });
@@ -686,6 +747,12 @@ function bindSettingsHandlers() {
   });
 }
 
+function bindRangeSetting(id, applyValue) {
+  const input = document.getElementById(id);
+  input.addEventListener('input', e => applyValue(e.target.value));
+  input.addEventListener('change', () => saveSettings(settings));
+}
+
 function bindControlHandlers() {
   document.getElementById('connect-midi').addEventListener('click', connectMidi);
 
@@ -696,7 +763,7 @@ function bindControlHandlers() {
   });
 
   document.getElementById('stop').addEventListener('click', () => {
-    document.getElementById('start').disabled = !midiAccess;
+    document.getElementById('start').disabled = !hasMidiInput();
     document.getElementById('stop').disabled = true;
     trainer.stop();
   });
@@ -705,7 +772,7 @@ function bindControlHandlers() {
     if (trainer.state !== 'idle') {
       // Stop first
       trainer.stop();
-      document.getElementById('start').disabled = !midiAccess;
+      document.getElementById('start').disabled = !hasMidiInput();
       document.getElementById('stop').disabled = true;
     }
     trainer.reset();
